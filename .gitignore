@@ -1,0 +1,23 @@
+# Binary
+ok200
+
+# Object files
+*.o
+*.a
+*.so
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
