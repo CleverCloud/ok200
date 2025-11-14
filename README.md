@@ -1,6 +1,6 @@
 # OK 200, the always OK web server
 
-A minimal HTTP server that never disagrees.
+A minimal HTTP server that never disagrees, based on [Mongoose](https://github.com/cesanta/mongoose).
 
 ## Build
 
@@ -20,7 +20,7 @@ Default port is 8080.
 
 ```bash
 $ ./ok200 4242
-Listening on port 4242...
+Server running on port 4242
 
 $ curl -i http://localhost:4242/some/path
 HTTP/1.1 200 OK
@@ -37,4 +37,4 @@ make install
 
 ## License
 
-MIT
+GPL-2.0-only

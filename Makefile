@@ -1,10 +1,10 @@
 CC ?= cc
-CFLAGS ?= -Wall -Wextra -O2
+CFLAGS ?= -Wall -Wextra -O2 -Isrc
 
 DESTDIR ?=
 PREFIX ?= /usr/local
 BINARY_REL ?= bin
-SRC = ok200.c
+SRC = src/ok200.c src/mongoose.c
 TARGET = ok200
 
 .PHONY: all clean install uninstall
