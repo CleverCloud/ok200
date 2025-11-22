@@ -59,6 +59,12 @@ Not OK
 make install
 ```
 
+## Test
+
+```bash
+bun test
+```
+
 ## License
 
 GPL-2.0-only
