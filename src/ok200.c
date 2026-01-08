@@ -52,6 +52,7 @@ static void signal_handler(int sig) {
 
 struct server_config {
     int backend_port;
+    const char *bind_addr;
 };
 
 static void print_help(const char *prog_name);
@@ -71,7 +72,7 @@ static int parse_port(const char *s) {
 
 static void parse_args(int argc, char *argv[], int *port, struct server_config *cfg) {
     int opt;
-    while ((opt = getopt(argc, argv, "hb:")) != -1) {
+    while ((opt = getopt(argc, argv, "hb:a:")) != -1) {
         switch (opt) {
             case 'h':
                 print_help(argv[0]);
@@ -81,6 +82,9 @@ static void parse_args(int argc, char *argv[], int *port, struct server_config *
                     fprintf(stderr, "Error: Invalid backend port '%s' (must be 1-65535)\n", optarg);
                     exit(1);
                 }
+                break;
+            case 'a':
+                cfg->bind_addr = optarg;
                 break;
             case '?':
             default:
@@ -106,12 +110,14 @@ static void print_help(const char *prog_name) {
     printf("  PORT    Port to listen on (default: 8080, range: 1-65535)\n");
     printf("\n");
     printf("Options:\n");
+    printf("  -a ADDR   Address to bind to (default: 0.0.0.0)\n");
     printf("  -b PORT   Backend port to check (if set, proxies health check)\n");
     printf("  -h        Show this help message\n");
     printf("\n");
     printf("Examples:\n");
-    printf("  %s                    # Listen on default port 8080, always return OK\n", prog_name);
-    printf("  %s 4242               # Listen on port 4242\n", prog_name);
+    printf("  %s                    # Listen on 0.0.0.0:8080, always return OK\n", prog_name);
+    printf("  %s 4242               # Listen on 0.0.0.0:4242\n", prog_name);
+    printf("  %s -a 127.0.0.1       # Listen only on localhost\n", prog_name);
     printf("  %s -b 3000            # Check backend on port 3000 before responding\n", prog_name);
     printf("  %s -b 3000 8080       # Listen on 8080, check backend on 3000\n", prog_name);
     printf("\n");
@@ -247,8 +253,12 @@ int main(int argc, char *argv[]) {
 
     parse_args(argc, argv, &port, &cfg);
 
+    /* Default bind address */
+    const char *bind_addr = cfg.bind_addr ? cfg.bind_addr : "0.0.0.0";
+
     char addr[BUFFER_SIZE];
-    snprintf(addr, sizeof(addr), "http://0.0.0.0:%d", port);
+    snprintf(addr, sizeof(addr), "http://%s:%d", bind_addr, port);
+
     /* Set up signal handlers for graceful shutdown */
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -258,15 +268,15 @@ int main(int argc, char *argv[]) {
 
     struct mg_connection *c = mg_http_listen(&mgr, addr, fn, &cfg);
     if (c == NULL) {
-        fprintf(stderr, "Failed to start server on port %d, maybe it's already in use?\n", port);
+        fprintf(stderr, "Failed to start server on %s:%d, maybe it's already in use?\n", bind_addr, port);
         mg_mgr_free(&mgr);
         return 1;
     }
 
     if (cfg.backend_port > 0) {
-        printf("Server running on port %d, checking backend on port %d\n", port, cfg.backend_port);
+        printf("Server running on %s:%d, checking backend on port %d\n", bind_addr, port, cfg.backend_port);
     } else {
-        printf("Server running on port %d\n", port);
+        printf("Server running on %s:%d\n", bind_addr, port);
     }
     fflush(stdout);
 
