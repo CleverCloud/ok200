@@ -22,7 +22,7 @@
 #define MG_MAX_RECV_SIZE 4096
 
 /* Buffer sizes for formatting */
-#define BUFFER_SIZE 64
+#define BUFFER_SIZE 128
 #define POLL_INTERVAL_MS 1000
 
 /* Response bodies - use sizeof to avoid length mismatch errors */
@@ -53,6 +53,7 @@ static void signal_handler(int sig) {
 struct server_config {
     int backend_port;
     const char *bind_addr;
+    const char *backend_path;
 };
 
 static void print_help(const char *prog_name);
@@ -71,8 +72,14 @@ static int parse_port(const char *s) {
 }
 
 static void parse_args(int argc, char *argv[], int *port, struct server_config *cfg) {
+    /* Check environment variable first (can be overridden by -p) */
+    const char *env_path = getenv("CC_HEALTH_CHECK_PATH");
+    if (env_path != NULL && env_path[0] != '\0') {
+        cfg->backend_path = env_path;
+    }
+
     int opt;
-    while ((opt = getopt(argc, argv, "hb:a:")) != -1) {
+    while ((opt = getopt(argc, argv, "hb:a:p:")) != -1) {
         switch (opt) {
             case 'h':
                 print_help(argv[0]);
@@ -85,6 +92,9 @@ static void parse_args(int argc, char *argv[], int *port, struct server_config *
                 break;
             case 'a':
                 cfg->bind_addr = optarg;
+                break;
+            case 'p':
+                cfg->backend_path = optarg;
                 break;
             case '?':
             default:
@@ -112,14 +122,18 @@ static void print_help(const char *prog_name) {
     printf("Options:\n");
     printf("  -a ADDR   Address to bind to (default: 0.0.0.0)\n");
     printf("  -b PORT   Backend port to check (if set, proxies health check)\n");
+    printf("  -p PATH   Backend path to check (default: /)\n");
     printf("  -h        Show this help message\n");
+    printf("\n");
+    printf("Environment:\n");
+    printf("  CC_HEALTH_CHECK_PATH   Backend path (overridden by -p)\n");
     printf("\n");
     printf("Examples:\n");
     printf("  %s                    # Listen on 0.0.0.0:8080, always return OK\n", prog_name);
     printf("  %s 4242               # Listen on 0.0.0.0:4242\n", prog_name);
     printf("  %s -a 127.0.0.1       # Listen only on localhost\n", prog_name);
     printf("  %s -b 3000            # Check backend on port 3000 before responding\n", prog_name);
-    printf("  %s -b 3000 8080       # Listen on 8080, check backend on 3000\n", prog_name);
+    printf("  %s -b 3000 -p /health # Check backend health endpoint\n", prog_name);
     printf("\n");
 }
 
@@ -232,8 +246,17 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     }
     req->client_id = c->id;
 
+    /* Use configured path or default to "/" */
+    const char *path = cfg->backend_path ? cfg->backend_path : "/";
+    /* Ensure path starts with "/" */
+    char path_buf[BUFFER_SIZE];
+    if (path[0] != '/') {
+        snprintf(path_buf, sizeof(path_buf), "/%s", path);
+        path = path_buf;
+    }
+
     char url[BUFFER_SIZE];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/", cfg->backend_port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d%s", cfg->backend_port, path);
 
     struct mg_connection *bc = mg_http_connect(c->mgr, url, backend_fn, req);
     if (bc == NULL) {
@@ -242,8 +265,8 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
         return;
     }
 
-    mg_printf(bc, "GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n",
-              cfg->backend_port);
+    mg_printf(bc, "GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n",
+              path, cfg->backend_port);
 }
 
 int main(int argc, char *argv[]) {
