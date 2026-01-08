@@ -21,9 +21,10 @@
 #define MG_IO_TIMEOUT 5000
 #define MG_MAX_RECV_SIZE 4096
 
-/* Buffer sizes for formatting */
-#define BUFFER_SIZE 128
+/* Buffer sizes and limits */
+#define BUFFER_SIZE 256
 #define POLL_INTERVAL_MS 1000
+#define MAX_PATHS 5
 
 /* Response bodies - use sizeof to avoid length mismatch errors */
 #define BODY_OK "OK"
@@ -53,7 +54,8 @@ static void signal_handler(int sig) {
 struct server_config {
     int backend_port;
     const char *bind_addr;
-    const char *backend_path;
+    const char *backend_paths[MAX_PATHS];
+    int path_count;
 };
 
 static void print_help(const char *prog_name);
@@ -71,14 +73,29 @@ static int parse_port(const char *s) {
     return (int)port;
 }
 
+static void add_path(struct server_config *cfg, const char *path) {
+    if (cfg->path_count >= MAX_PATHS) {
+        fprintf(stderr, "Warning: Maximum number of paths (%d) reached, ignoring '%s'\n", MAX_PATHS, path);
+        return;
+    }
+    if (path != NULL && path[0] != '\0') {
+        cfg->backend_paths[cfg->path_count++] = path;
+    }
+}
+
 static void parse_args(int argc, char *argv[], int *port, struct server_config *cfg) {
-    /* Check environment variable first (can be overridden by -p) */
-    const char *env_path = getenv("CC_HEALTH_CHECK_PATH");
-    if (env_path != NULL && env_path[0] != '\0') {
-        cfg->backend_path = env_path;
+    /* Check environment variables CC_HEALTH_CHECK_PATH_0, CC_HEALTH_CHECK_PATH_1, etc. */
+    char env_name[32];
+    for (int i = 0; i < MAX_PATHS; i++) {
+        snprintf(env_name, sizeof(env_name), "CC_HEALTH_CHECK_PATH_%d", i);
+        const char *env_path = getenv(env_name);
+        if (env_path != NULL && env_path[0] != '\0') {
+            add_path(cfg, env_path);
+        }
     }
 
     int opt;
+    bool has_p_option = false;
     while ((opt = getopt(argc, argv, "hb:a:p:")) != -1) {
         switch (opt) {
             case 'h':
@@ -94,7 +111,12 @@ static void parse_args(int argc, char *argv[], int *port, struct server_config *
                 cfg->bind_addr = optarg;
                 break;
             case 'p':
-                cfg->backend_path = optarg;
+                /* -p option overrides environment variables */
+                if (!has_p_option) {
+                    cfg->path_count = 0;  /* Clear paths from env vars */
+                    has_p_option = true;
+                }
+                add_path(cfg, optarg);
                 break;
             case '?':
             default:
@@ -122,18 +144,22 @@ static void print_help(const char *prog_name) {
     printf("Options:\n");
     printf("  -a ADDR   Address to bind to (default: 0.0.0.0)\n");
     printf("  -b PORT   Backend port to check (if set, proxies health check)\n");
-    printf("  -p PATH   Backend path to check (default: /)\n");
+    printf("  -p PATH   Backend path to check (can be specified multiple times)\n");
     printf("  -h        Show this help message\n");
     printf("\n");
     printf("Environment:\n");
-    printf("  CC_HEALTH_CHECK_PATH   Backend path (overridden by -p)\n");
+    printf("  CC_HEALTH_CHECK_PATH_0, CC_HEALTH_CHECK_PATH_1, ...\n");
+    printf("            Backend paths to check (overridden by -p options)\n");
+    printf("\n");
+    printf("When multiple paths are specified, all must return 2xx for OK response.\n");
     printf("\n");
     printf("Examples:\n");
-    printf("  %s                    # Listen on 0.0.0.0:8080, always return OK\n", prog_name);
-    printf("  %s 4242               # Listen on 0.0.0.0:4242\n", prog_name);
-    printf("  %s -a 127.0.0.1       # Listen only on localhost\n", prog_name);
-    printf("  %s -b 3000            # Check backend on port 3000 before responding\n", prog_name);
-    printf("  %s -b 3000 -p /health # Check backend health endpoint\n", prog_name);
+    printf("  %s                         # Listen on 0.0.0.0:8080, always return OK\n", prog_name);
+    printf("  %s 4242                    # Listen on 0.0.0.0:4242\n", prog_name);
+    printf("  %s -a 127.0.0.1            # Listen only on localhost\n", prog_name);
+    printf("  %s -b 3000                 # Check backend on port 3000 (path: /)\n", prog_name);
+    printf("  %s -b 3000 -p /health      # Check /health endpoint\n", prog_name);
+    printf("  %s -b 3000 -p /health -p /ready  # Check both endpoints\n", prog_name);
     printf("\n");
 }
 
@@ -182,9 +208,17 @@ static void send_response(struct mg_connection *c, bool is_ok) {
     c->is_resp = 0;
 }
 
-struct backend_request {
+struct multi_backend_request {
     unsigned long client_id;
+    int total_paths;
+    int completed;
+    int success_count;
     bool responded;
+};
+
+struct backend_request {
+    struct multi_backend_request *parent;
+    bool completed;
 };
 
 /*
@@ -198,15 +232,34 @@ static struct mg_connection *find_connection(struct mg_mgr *mgr, unsigned long i
     return NULL;
 }
 
-static void try_respond(struct mg_connection *backend, bool is_ok) {
+static void try_respond_multi(struct mg_connection *backend, bool is_ok) {
     struct backend_request *req = (struct backend_request *)backend->fn_data;
-    if (req == NULL || req->responded) return;
+    if (req == NULL || req->completed) return;
 
-    struct mg_connection *client = find_connection(backend->mgr, req->client_id);
-    if (client != NULL && !client->is_closing) {
-        send_response(client, is_ok);
+    struct multi_backend_request *parent = req->parent;
+    if (parent == NULL || parent->responded) {
+        req->completed = true;
+        return;
     }
-    req->responded = true;
+
+    req->completed = true;
+    parent->completed++;
+    if (is_ok) {
+        parent->success_count++;
+    }
+
+    /* Check if all requests are complete */
+    if (parent->completed >= parent->total_paths) {
+        /* All paths must succeed for OK response */
+        bool all_ok = (parent->success_count == parent->total_paths);
+
+        struct mg_connection *client = find_connection(backend->mgr, parent->client_id);
+        if (client != NULL && !client->is_closing) {
+            send_response(client, all_ok);
+        }
+        parent->responded = true;
+        free(parent);
+    }
 }
 
 static void backend_fn(struct mg_connection *c, int ev, void *ev_data) {
@@ -218,12 +271,12 @@ static void backend_fn(struct mg_connection *c, int ev, void *ev_data) {
          * 2xx (200..299) status as OK for health-check semantics. */
         int status = mg_http_status(hm);
         bool is_ok = (status >= 200 && status < 300);
-        try_respond(c, is_ok);
+        try_respond_multi(c, is_ok);
         c->is_closing = 1;
     } else if (ev == MG_EV_ERROR) {
-        try_respond(c, false);
+        try_respond_multi(c, false);
     } else if (ev == MG_EV_CLOSE) {
-        try_respond(c, false);
+        try_respond_multi(c, false);
         free(c->fn_data);
         c->fn_data = NULL;
     }
@@ -239,34 +292,58 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
         return;
     }
 
-    struct backend_request *req = calloc(1, sizeof(*req));
-    if (req == NULL) {
+    /* Determine paths to check */
+    int path_count = cfg->path_count > 0 ? cfg->path_count : 1;
+    const char *default_path = "/";
+
+    /* Allocate parent request to track all backend requests */
+    struct multi_backend_request *parent = calloc(1, sizeof(*parent));
+    if (parent == NULL) {
         send_response(c, false);
         return;
     }
-    req->client_id = c->id;
+    parent->client_id = c->id;
+    parent->total_paths = path_count;
 
-    /* Use configured path or default to "/" */
-    const char *path = cfg->backend_path ? cfg->backend_path : "/";
-    /* Ensure path starts with "/" */
-    char path_buf[BUFFER_SIZE];
-    if (path[0] != '/') {
-        snprintf(path_buf, sizeof(path_buf), "/%s", path);
-        path = path_buf;
+    /* Start a backend request for each path */
+    for (int i = 0; i < path_count; i++) {
+        const char *path = (cfg->path_count > 0) ? cfg->backend_paths[i] : default_path;
+
+        /* Build URL and request path - ensure path starts with "/" */
+        char url[BUFFER_SIZE];
+        char req_path[BUFFER_SIZE];
+        if (path[0] != '/') {
+            snprintf(req_path, sizeof(req_path), "/%s", path);
+        } else {
+            snprintf(req_path, sizeof(req_path), "%s", path);
+        }
+        snprintf(url, sizeof(url), "http://127.0.0.1:%d%s", cfg->backend_port, req_path);
+
+        struct backend_request *req = calloc(1, sizeof(*req));
+        if (req == NULL) {
+            /* Mark this path as failed */
+            parent->completed++;
+            continue;
+        }
+        req->parent = parent;
+
+        struct mg_connection *bc = mg_http_connect(c->mgr, url, backend_fn, req);
+        if (bc == NULL) {
+            free(req);
+            parent->completed++;
+            continue;
+        }
+
+        mg_printf(bc, "GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n",
+                  req_path, cfg->backend_port);
     }
 
-    char url[BUFFER_SIZE];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d%s", cfg->backend_port, path);
-
-    struct mg_connection *bc = mg_http_connect(c->mgr, url, backend_fn, req);
-    if (bc == NULL) {
-        free(req);
+    /* If all connections failed immediately, respond now */
+    if (parent->completed >= parent->total_paths && !parent->responded) {
         send_response(c, false);
-        return;
+        parent->responded = true;
+        free(parent);
     }
-
-    mg_printf(bc, "GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n\r\n",
-              path, cfg->backend_port);
 }
 
 int main(int argc, char *argv[]) {
@@ -283,8 +360,12 @@ int main(int argc, char *argv[]) {
     snprintf(addr, sizeof(addr), "http://%s:%d", bind_addr, port);
 
     /* Set up signal handlers for graceful shutdown */
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    struct sigaction sa;
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
@@ -297,7 +378,17 @@ int main(int argc, char *argv[]) {
     }
 
     if (cfg.backend_port > 0) {
-        printf("Server running on %s:%d, checking backend on port %d\n", bind_addr, port, cfg.backend_port);
+        printf("Server running on %s:%d, checking backend on port %d", bind_addr, port, cfg.backend_port);
+        if (cfg.path_count > 0) {
+            printf(" (%s: ", cfg.path_count == 1 ? "path" : "paths");
+            for (int i = 0; i < cfg.path_count; i++) {
+                printf("%s%s", cfg.backend_paths[i], (i < cfg.path_count - 1) ? ", " : "");
+            }
+            printf(")");
+        } else {
+            printf(" (path: /)");
+        }
+        printf("\n");
     } else {
         printf("Server running on %s:%d\n", bind_addr, port);
     }
