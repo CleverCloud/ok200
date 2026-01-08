@@ -34,12 +34,21 @@
 #include "mongoose.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>  /* For getopt */
+
+/* Flag for graceful shutdown */
+static volatile sig_atomic_t running = 1;
+
+static void signal_handler(int sig) {
+    (void)sig;
+    running = 0;
+}
 
 struct server_config {
     int backend_port;
@@ -240,6 +249,9 @@ int main(int argc, char *argv[]) {
 
     char addr[BUFFER_SIZE];
     snprintf(addr, sizeof(addr), "http://0.0.0.0:%d", port);
+    /* Set up signal handlers for graceful shutdown */
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
 
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
@@ -257,8 +269,12 @@ int main(int argc, char *argv[]) {
         printf("Server running on port %d\n", port);
     }
     fflush(stdout);
-    for (;;) mg_mgr_poll(&mgr, POLL_INTERVAL_MS);
 
+    while (running) {
+        mg_mgr_poll(&mgr, POLL_INTERVAL_MS);
+    }
+
+    printf("\nShutting down...\n");
     mg_mgr_free(&mgr);
     return 0;
 }
