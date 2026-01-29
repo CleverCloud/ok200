@@ -232,6 +232,7 @@ struct multi_backend_request {
     int total_paths;
     int completed;
     int success_count;
+    int closed_count;  /* Track closed connections for safe cleanup */
     bool responded;
 };
 
@@ -276,7 +277,21 @@ static void try_respond_multi(struct mg_connection *backend, bool is_ok) {
         if (client != NULL && !client->is_closing) {
             send_response(client, all_ok);
         }
+        /* Mark as responded so subsequent backend events no-op safely.
+         * Do not free(parent) here as other backend_request instances may
+         * still hold pointers to this shared structure. */
         parent->responded = true;
+    }
+}
+
+/*
+ * Free parent when all backend connections are closed.
+ * This avoids use-after-free when other connections still reference parent.
+ */
+static void try_free_parent(struct multi_backend_request *parent) {
+    if (parent == NULL) return;
+    parent->closed_count++;
+    if (parent->closed_count >= parent->total_paths) {
         free(parent);
     }
 }
@@ -296,7 +311,9 @@ static void backend_fn(struct mg_connection *c, int ev, void *ev_data) {
         try_respond_multi(c, false);
     } else if (ev == MG_EV_CLOSE) {
         try_respond_multi(c, false);
-        free(c->fn_data);
+        struct backend_request *req = (struct backend_request *)c->fn_data;
+        try_free_parent(req->parent);
+        free(req);
         c->fn_data = NULL;
     }
 }
@@ -340,8 +357,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 
         struct backend_request *req = calloc(1, sizeof(*req));
         if (req == NULL) {
-            /* Mark this path as failed */
+            /* Mark this path as failed - no connection created */
             parent->completed++;
+            parent->closed_count++;
             continue;
         }
         req->parent = parent;
@@ -349,7 +367,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
         struct mg_connection *bc = mg_http_connect(c->mgr, url, backend_fn, req);
         if (bc == NULL) {
             free(req);
+            /* Mark this path as failed - no connection created */
             parent->completed++;
+            parent->closed_count++;
             continue;
         }
 
@@ -382,7 +402,7 @@ int main(int argc, char *argv[]) {
     struct sigaction sa;
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;  /* Automatically restart interrupted system calls */
+    sa.sa_flags = 0;  /* Don't use SA_RESTART to allow immediate shutdown on signal */
     if (sigaction(SIGINT, &sa, NULL) != 0) {
         fprintf(stderr, "Warning: Failed to set SIGINT handler: %s\n", strerror(errno));
     }
