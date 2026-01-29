@@ -27,7 +27,10 @@ Port must be in range 1-65535.
 
 ### Environment Variables
 
+- `CC_HEALTH_CHECK_PATH` - Backend path to check (cannot be used with `CC_HEALTH_CHECK_PATH_0`)
 - `CC_HEALTH_CHECK_PATH_0`, `CC_HEALTH_CHECK_PATH_1`, ... - Backend paths to check (max 5, overridden by `-p` options)
+
+Note: `CC_HEALTH_CHECK_PATH` can be combined with `CC_HEALTH_CHECK_PATH_1`, `CC_HEALTH_CHECK_PATH_2`, etc.
 
 When multiple paths are specified, all must return 2xx for OK response.
 
@@ -80,7 +83,7 @@ Not OK
 
 ```bash
 $ ./ok200 -b 3000 -p /health 8080
-Server running on 0.0.0.0:8080, checking backend on port 3000 (paths: /health)
+Server running on 0.0.0.0:8080, checking backend on port 3000 (path: /health)
 ```
 
 ### Check multiple backend paths
@@ -93,6 +96,12 @@ Server running on 0.0.0.0:8080, checking backend on port 3000 (paths: /health, /
 ```
 
 Using environment variables:
+
+```bash
+$ CC_HEALTH_CHECK_PATH=/health ./ok200 -b 3000
+```
+
+Or with multiple paths:
 
 ```bash
 $ CC_HEALTH_CHECK_PATH_0=/health CC_HEALTH_CHECK_PATH_1=/ready ./ok200 -b 3000

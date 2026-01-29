@@ -73,26 +73,42 @@ static int parse_port(const char *s) {
     return (int)port;
 }
 
+static bool is_env_set(const char *value) {
+    return value != NULL && value[0] != '\0';
+}
+
 static void add_path(struct server_config *cfg, const char *path) {
     if (cfg->path_count >= MAX_PATHS) {
         fprintf(stderr, "Warning: Maximum number of paths (%d) reached, ignoring '%s'\n", MAX_PATHS, path);
         return;
     }
-    if (path != NULL && path[0] != '\0') {
+    if (is_env_set(path)) {
         cfg->backend_paths[cfg->path_count++] = path;
     }
 }
 
-static void parse_args(int argc, char *argv[], int *port, struct server_config *cfg) {
-    /* Check environment variables CC_HEALTH_CHECK_PATH_0, CC_HEALTH_CHECK_PATH_1, etc. */
+static void load_paths_from_env(struct server_config *cfg) {
+    const char *single_path = getenv("CC_HEALTH_CHECK_PATH");
     char env_name[32];
+
     for (int i = 0; i < MAX_PATHS; i++) {
         snprintf(env_name, sizeof(env_name), "CC_HEALTH_CHECK_PATH_%d", i);
-        const char *env_path = getenv(env_name);
-        if (env_path != NULL && env_path[0] != '\0') {
-            add_path(cfg, env_path);
+        const char *indexed_path = getenv(env_name);
+
+        if (i == 0 && is_env_set(single_path)) {
+            if (is_env_set(indexed_path)) {
+                fprintf(stderr, "Error: CC_HEALTH_CHECK_PATH and CC_HEALTH_CHECK_PATH_0 cannot both be set\n");
+                exit(1);
+            }
+            add_path(cfg, single_path);
+        } else if (is_env_set(indexed_path)) {
+            add_path(cfg, indexed_path);
         }
     }
+}
+
+static void parse_args(int argc, char *argv[], int *port, struct server_config *cfg) {
+    load_paths_from_env(cfg);
 
     int opt;
     bool has_p_option = false;
@@ -148,8 +164,11 @@ static void print_help(const char *prog_name) {
     printf("  -h        Show this help message\n");
     printf("\n");
     printf("Environment:\n");
+    printf("  CC_HEALTH_CHECK_PATH\n");
+    printf("            Backend path to check (cannot be used with CC_HEALTH_CHECK_PATH_0)\n");
     printf("  CC_HEALTH_CHECK_PATH_0, CC_HEALTH_CHECK_PATH_1, ...\n");
     printf("            Backend paths to check (overridden by -p options)\n");
+    printf("  Note: CC_HEALTH_CHECK_PATH can be combined with CC_HEALTH_CHECK_PATH_1, etc.\n");
     printf("\n");
     printf("When multiple paths are specified, all must return 2xx for OK response.\n");
     printf("\n");

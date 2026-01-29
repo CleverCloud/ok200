@@ -85,7 +85,7 @@ describe("ok200 - CC_HEALTH_CHECK_PATH_X Environment Variables", () => {
     expect(await res.text()).toBe("Not OK");
   });
 
-  test("-p option overrides CC_HEALTH_CHECK_PATH_X", async () => {
+  test("-p option overrides all environment variables", async () => {
     const backendPort = getPort();
     const frontendPort = getPort();
 
@@ -175,5 +175,75 @@ describe("ok200 - CC_HEALTH_CHECK_PATH_X Environment Variables", () => {
 
     expect(exitCode).toBe(0);
     expect(output).toContain("CC_HEALTH_CHECK_PATH_0");
+    expect(output).toContain("CC_HEALTH_CHECK_PATH\n");
+    expect(output).toContain("cannot be used with CC_HEALTH_CHECK_PATH_0");
+    expect(output).toContain("can be combined with CC_HEALTH_CHECK_PATH_1");
+  });
+
+  test("CC_HEALTH_CHECK_PATH sets backend path", async () => {
+    const backendPort = getPort();
+    const frontendPort = getPort();
+
+    const backend = await startBackendWithPath(backendPort, {
+      "/single-path": 200,
+      "/": 404,
+    });
+    processes.push(backend);
+
+    const server = await startOk200WithEnv(
+      ["-b", String(backendPort), String(frontendPort)],
+      { CC_HEALTH_CHECK_PATH: "/single-path" },
+    );
+    processes.push(server);
+
+    const res = await fetch(`http://127.0.0.1:${frontendPort}/`);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("OK");
+  });
+
+  test("error when both CC_HEALTH_CHECK_PATH and CC_HEALTH_CHECK_PATH_0 are set", async () => {
+    const proc = spawn([OK200_PATH, "-b", "59999", "19999"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        CC_HEALTH_CHECK_PATH: "/path1",
+        CC_HEALTH_CHECK_PATH_0: "/path2",
+      },
+    });
+
+    const exitCode = await proc.exited;
+    const stderr = await new Response(proc.stderr).text();
+
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain(
+      "CC_HEALTH_CHECK_PATH and CC_HEALTH_CHECK_PATH_0 cannot both be set",
+    );
+  });
+
+  test("CC_HEALTH_CHECK_PATH with CC_HEALTH_CHECK_PATH_1", async () => {
+    const backendPort = getPort();
+    const frontendPort = getPort();
+
+    const backend = await startBackendWithPath(backendPort, {
+      "/health": 200,
+      "/ready": 200,
+    });
+    processes.push(backend);
+
+    const server = await startOk200WithEnv(
+      ["-b", String(backendPort), String(frontendPort)],
+      {
+        CC_HEALTH_CHECK_PATH: "/health",
+        CC_HEALTH_CHECK_PATH_1: "/ready",
+      },
+    );
+    processes.push(server);
+
+    const res = await fetch(`http://127.0.0.1:${frontendPort}/`);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("OK");
   });
 });
