@@ -382,9 +382,13 @@ int main(int argc, char *argv[]) {
     struct sigaction sa;
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
+    sa.sa_flags = SA_RESTART;  /* Automatically restart interrupted system calls */
+    if (sigaction(SIGINT, &sa, NULL) != 0) {
+        fprintf(stderr, "Warning: Failed to set SIGINT handler: %s\n", strerror(errno));
+    }
+    if (sigaction(SIGTERM, &sa, NULL) != 0) {
+        fprintf(stderr, "Warning: Failed to set SIGTERM handler: %s\n", strerror(errno));
+    }
 
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
